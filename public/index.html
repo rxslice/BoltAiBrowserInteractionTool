@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Real Browser Interaction</title>
+      <style>
+        #browser-container {
+          width: 80%;
+          margin: 20px auto;
+          border: 1px solid #ccc;
+          box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        #address-bar {
+          padding: 10px;
+          background-color: #f0f0f0;
+          display: flex;
+          align-items: center;
+        }
+        #url-input {
+          flex-grow: 1;
+          padding: 8px;
+          margin-right: 5px;
+        }
+        #go-button {
+          padding: 8px 12px;
+          cursor: pointer;
+        }
+        #viewport {
+          height: 500px;
+          overflow: hidden;
+          position: relative;
+        }
+        #browser-image {
+          max-width: 100%;
+          max-height: 100%;
+          position: absolute;
+          top: 0;
+          left: 0;
+        }
+        .element-overlay {
+          position: absolute;
+          border: 1px solid blue;
+          pointer-events: auto;
+          cursor: pointer;
+          background-color: rgba(0, 0, 255, 0.1);
+        }
+        .element-overlay.highlighted {
+          border: 2px solid red;
+          background-color: rgba(255, 0, 0, 0.2);
+        }
+        .element-overlay.focused {
+          border: 2px solid green;
+          background-color: rgba(0, 255, 0, 0.2);
+        }
+        #input-box {
+          position: absolute;
+          bottom: 10px;
+          left: 10px;
+          display: none;
+        }
+        #error-message {
+          position: absolute;
+          top: 10px;
+          left: 10px;
+          background-color: rgba(255, 0, 0, 0.8);
+          color: white;
+          padding: 10px;
+          display: none;
+        }
+      </style>
+    </head>
+    <body>
+      <div id="browser-container">
+        <div id="address-bar">
+          <input type="text" id="url-input" placeholder="Enter URL">
+          <button id="go-button">Go</button>
+        </div>
+        <div id="viewport">
+          <img id="browser-image" src="" alt="Browser View">
+        </div>
+        <div id="input-box">
+          <input type="text" id="text-input" placeholder="Enter text">
+          <button id="send-input">Send</button>
+        </div>
+        <div id="error-message"></div>
+      </div>
+      <script src="/socket.io/socket.io.js"></script>
+      <script>
+        const socket = io();
+        const urlInput = document.getElementById('url-input');
+        const goButton = document.getElementById('go-button');
+        const browserImage = document.getElementById('browser-image');
+        const viewport = document.getElementById('viewport');
+        const inputBox = document.getElementById('input-box');
+        const textInput = document.getElementById('text-input');
+        const sendInputButton = document.getElementById('send-input');
+        const errorMessage = document.getElementById('error-message');
+        let elements = [];
+        let highlightedElement = null;
+        let focusedElement = null;
+
+        goButton.addEventListener('click', () => {
+          const url = urlInput.value;
+          if (url) {
+            socket.emit('loadURL', url);
+          }
+        });
+
+        socket.on('pageUpdate', (screenshot) => {
+          browserImage.src = `data:image/png;base64,${screenshot}`;
+          socket.emit('getElements');
+          inputBox.style.display = 'none';
+          if (highlightedElement) {
+            highlightedElement.classList.remove('highlighted');
+            highlightedElement = null;
+          }
+          if (focusedElement) {
+            focusedElement.classList.remove('focused');
+            focusedElement = null;
+          }
+          errorMessage.style.display = 'none';
+        });
+
+        socket.on('elements', (elementList) => {
+          elements = elementList;
+          viewport.querySelectorAll('.element-overlay').forEach(el => el.remove());
+          elements.forEach(el => {
+            const overlay = document.createElement('div');
+            overlay.classList.add('element-overlay');
+            overlay.style.left = `${el.x}px`;
+            overlay.style.top = `${el.y}px`;
+            overlay.style.width = `${el.width}px`;
+            overlay.style.height = `${el.height}px`;
+            overlay.title = `${el.tagName} ${el.className} ${el.id} ${el.textContent}`;
+            overlay.addEventListener('click', (event) => {
+              if (event.button === 2) {
+                socket.emit('contextmenu', { selector: getSelector(el) });
+                return;
+              }
+              if (el.isInput) {
+                inputBox.style.display = 'block';
+                textInput.focus();
+                if (highlightedElement) {
+                  highlightedElement.classList.remove('highlighted');
+                }
+                if (focusedElement) {
+                  focusedElement.classList.remove('focused');
+                }
+                highlightedElement = overlay;
+                overlay.classList.add('highlighted');
+                focusedElement = overlay;
+                overlay.classList.add('focused');
+                socket.emit('focus', { selector: getSelector(el) });
+              } else {
+                socket.emit('click', { selector: getSelector(el) });
+              }
+            });
+            overlay.addEventListener('mouseover', () => {
+              socket.emit('hover', { selector: getSelector(el) });
+            });
+            viewport.appendChild(overlay);
+          });
+        });
+
+        sendInputButton.addEventListener('click', () => {
+          if (focusedElement) {
+            const element = elements.find(el => getSelector(el) === focusedElement.title.split(' ').slice(-1)[0]);
+            if (element) {
+              socket.emit('input', { selector: getSelector(element), text: textInput.value });
+              textInput.value = '';
+              inputBox.style.display = 'none';
+            }
+          }
+        });
+
+        document.addEventListener('keydown', (event) => {
+          if (focusedElement && inputBox.style.display === 'none') {
+            socket.emit('keydown', { selector: getSelector(focusedElement), key: event.key });
+          }
+        });
+
+        browserImage.addEventListener('wheel', (event) => {
+          socket.emit('scroll', { deltaY: event.deltaY });
+        });
+
+        socket.on('error', (message) => {
+          errorMessage.textContent = message;
+          errorMessage.style.display = 'block';
+        });
+
+        function getSelector(element) {
+          if (element.id) return `#${element.id}`;
+          if (element.className) return `.${element.className.split(' ').join('.')}`;
+          return element.tagName;
+        }
+      </script>
+    </body>
+    </html>
